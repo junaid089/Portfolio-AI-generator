@@ -73,6 +73,8 @@
                         <figure class="image is-4by1">
                             {% if featured_assets.0.processed_image %}
                                 <img style="object-fit:cover; width:100%; height:120px; border-radius:6px;" src="{{ featured_assets.0.processed_image.url }}" alt="featured">
+                            {% elif featured_assets.0.preview_image %}
+                                <img style="object-fit:cover; width:100%; height:120px; border-radius:6px;" src="{{ featured_assets.0.preview_image.url }}" alt="featured">
                             {% elif featured_assets.0.image %}
                                 <img style="object-fit:cover; width:100%; height:120px; border-radius:6px;" src="{{ featured_assets.0.image.url }}" alt="featured">
                             {% elif featured_assets.0.file %}
@@ -99,6 +101,8 @@
                         <figure class="image is-4by3" style="margin:0;">
                             {% if a.processed_image %}
                                 <img src="{{ a.processed_image.url }}" alt="{{ a.title }}" style="object-fit:cover; width:100%; height:200px;">
+                            {% elif a.preview_image %}
+                                <img src="{{ a.preview_image.url }}" alt="{{ a.title }}" style="object-fit:cover; width:100%; height:200px;">
                             {% elif a.image %}
                                 <img src="{{ a.image.url }}" alt="{{ a.title }}" style="object-fit:cover; width:100%; height:200px;">
                             {% else %}
