@@ -77,7 +77,11 @@
     <div class="card">
       <div class="card-image">
         <figure class="image is-4by3">
-          <img src="{{ a.image.url }}" alt="{{ a.title }}">
+          {% if a.preview_image %}
+            <img src="{{ a.preview_image.url }}" alt="{{ a.title }}">
+          {% else %}
+            <img src="{{ a.image.url }}" alt="{{ a.title }}">
+          {% endif %}
         </figure>
       </div>
       <div class="card-content">
@@ -180,6 +184,11 @@ async function onRegenClick(e) {
           img.src = j.url + (j.url.indexOf('?') === -1 ? '?' : '&') + 'v=' + Date.now();
         }
       }
+    } else if (j.status === 'enqueued' && j.url) {
+      // Poll the preview URL until it becomes available
+      const card = btn.closest('.card');
+      const img = card ? card.querySelector('img') : null;
+      await pollPreviewAndUpdate(j.url, img);
     } else {
       alert('Regeneration failed: ' + (j.message || JSON.stringify(j)));
     }
@@ -192,6 +201,27 @@ async function onRegenClick(e) {
 
 // run on initial load
 attachRegenHandlers();
+
+async function pollPreviewAndUpdate(url, imgEl) {
+  const spinner = document.createElement('div'); spinner.className = 'notification is-info'; spinner.textContent = 'Waiting for preview...';
+  const container = document.getElementById('gen-results');
+  container.insertBefore(spinner, container.firstChild);
+  for (let i=0;i<60;i++) {
+    try {
+      const r = await fetch(url, {method: 'GET'});
+      if (r.ok) {
+        // update element
+        spinner.remove();
+        if (imgEl) imgEl.src = url + (url.indexOf('?') === -1 ? '?' : '&') + 'v=' + Date.now();
+        return;
+      }
+    } catch (err) {
+      // ignore and retry
+    }
+    await new Promise(res => setTimeout(res, 1000));
+  }
+  spinner.textContent = 'Preview generation is taking longer than expected.';
+}
 
 async function pollJob(jobId) {
   const statusUrl = `{% url 'editor:generator_status' 0 %}`.replace('/0/', '/' + jobId + '/');

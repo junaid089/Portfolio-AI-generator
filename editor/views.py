@@ -371,45 +371,58 @@ def regenerate_preview(request, asset_id):
     except Exception:
         return JsonResponse({'status': 'error', 'message': 'Asset has no file path'}, status=400)
 
-    # create preview
+    # compute expected preview name/url
+    preview_name = os.path.splitext(os.path.basename(img_path))[0] + '.jpg'
+    preview_rel = f'previews/{preview_name}'
+    preview_url = request.build_absolute_uri(settings.MEDIA_URL + preview_rel)
+
+    # Try to enqueue HF preview generation via Celery; if not available, fall back to synchronous local generation
     try:
-        from PIL import Image, ImageDraw, ImageFont
-        with Image.new('RGB', (512, 512), color=(24, 24, 24)) as base:
-            draw = ImageDraw.Draw(base)
-            try:
-                font_size = max(14, 512 // 20)
-                font = ImageFont.truetype('arial.ttf', font_size)
-            except Exception:
-                font = ImageFont.load_default()
+        from .tasks import hf_generate_preview_task
+        hf_generate_preview_task.delay(asset.id, prompt=asset.title or None)
+        return JsonResponse({'status': 'enqueued', 'url': preview_url})
+    except Exception:
+        # fallback to local generation (same behavior as the older implementation)
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            with Image.new('RGB', (512, 512), color=(24, 24, 24)) as base:
+                draw = ImageDraw.Draw(base)
+                try:
+                    font_size = max(14, 512 // 20)
+                    font = ImageFont.truetype('arial.ttf', font_size)
+                except Exception:
+                    font = ImageFont.load_default()
 
-            text = asset.title or os.path.splitext(os.path.basename(img_path))[0]
-            lines = f"{text}\n(regenerated)"
-            try:
-                bbox = draw.multiline_textbbox((0, 0), lines, font=font, spacing=4)
-                tw = bbox[2] - bbox[0]
-                th = bbox[3] - bbox[1]
-            except Exception:
-                tw, th = draw.textsize(lines, font=font)
-            x = max(10, (512 - tw) // 2)
-            y = max(10, (512 - th) // 2)
-            draw.multiline_text((x, y), lines, fill=(230, 230, 230), font=font, align='center', spacing=4)
+                text = asset.title or os.path.splitext(os.path.basename(img_path))[0]
+                lines = f"{text}\n(regenerated)"
+                try:
+                    bbox = draw.multiline_textbbox((0, 0), lines, font=font, spacing=4)
+                    tw = bbox[2] - bbox[0]
+                    th = bbox[3] - bbox[1]
+                except Exception:
+                    tw, th = draw.textsize(lines, font=font)
+                x = max(10, (512 - tw) // 2)
+                y = max(10, (512 - th) // 2)
+                draw.multiline_text((x, y), lines, fill=(230, 230, 230), font=font, align='center', spacing=4)
 
-            # Attempt to preserve original size if possible
-            try:
-                # if original exists, use its size
-                from PIL import Image as PILImage
-                orig = PILImage.open(img_path)
-                w, h = orig.size
-                orig.close()
-                if (w, h) != (512, 512):
-                    base = base.resize((w, h), PILImage.Resampling.LANCZOS)
-            except Exception:
-                pass
+                # Attempt to preserve original size if possible
+                try:
+                    from PIL import Image as PILImage
+                    orig = PILImage.open(img_path)
+                    w, h = orig.size
+                    orig.close()
+                    if (w, h) != (512, 512):
+                        base = base.resize((w, h), PILImage.Resampling.LANCZOS)
+                except Exception:
+                    pass
 
-            base.save(img_path, format='JPEG', quality=90)
+                previews_dir = os.path.join(settings.MEDIA_ROOT, 'previews')
+                os.makedirs(previews_dir, exist_ok=True)
+                preview_path = os.path.join(previews_dir, preview_name)
+                base.save(preview_path, format='JPEG', quality=90)
 
-        # Clear any cached fields and return new URL
-        asset.save()
-        return JsonResponse({'status': 'ok', 'url': request.build_absolute_uri(asset.image.url)})
-    except Exception as e:
-        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+            asset.preview_image.name = preview_rel
+            asset.save()
+            return JsonResponse({'status': 'ok', 'url': request.build_absolute_uri(asset.preview_image.url)})
+        except Exception as e:
+            return JsonResponse({'status': 'error', 'message': str(e)}, status=500)

@@ -64,19 +64,29 @@ class Command(BaseCommand):
             y = max(10, (h - th) // 2)
             draw.multiline_text((x, y), lines, fill=(230, 230, 230), font=font, align='center', spacing=4)
 
-            # Save preview into previews/ and set asset.preview_image
+            # Try to enqueue HF preview generation via Celery; fallback to local write
+            enqueued = False
             try:
-                previews_dir = os.path.join(settings.MEDIA_ROOT, 'previews')
-                os.makedirs(previews_dir, exist_ok=True)
-                preview_name = os.path.splitext(os.path.basename(path))[0] + '.jpg'
-                preview_path = os.path.join(previews_dir, preview_name)
-                base.save(preview_path, format='JPEG', quality=90)
-                # attach to model
-                a.preview_image.name = f'previews/{preview_name}'
-                a.save()
+                from editor.tasks import hf_generate_preview_task
+                # enqueue async preview generation
+                hf_generate_preview_task.delay(a.id, prompt=a.title or os.path.splitext(os.path.basename(path))[0])
+                self.stdout.write(f"Enqueued preview generation for asset {a.id}")
+                enqueued = True
                 total += 1
-                self.stdout.write(f"Wrote preview: {preview_path}")
-            except Exception as e:
-                self.stderr.write(f"Failed to save preview for {path}: {e}")
+            except Exception:
+                # fallback: save preview locally (same behavior as before)
+                try:
+                    previews_dir = os.path.join(settings.MEDIA_ROOT, 'previews')
+                    os.makedirs(previews_dir, exist_ok=True)
+                    preview_name = os.path.splitext(os.path.basename(path))[0] + '.jpg'
+                    preview_path = os.path.join(previews_dir, preview_name)
+                    base.save(preview_path, format='JPEG', quality=90)
+                    # attach to model
+                    a.preview_image.name = f'previews/{preview_name}'
+                    a.save()
+                    total += 1
+                    self.stdout.write(f"Wrote preview: {preview_path}")
+                except Exception as e:
+                    self.stderr.write(f"Failed to save preview for {path}: {e}")
 
         self.stdout.write(self.style.SUCCESS(f"Finished. Regenerated {total} previews."))
