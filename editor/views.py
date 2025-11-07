@@ -8,6 +8,7 @@ from django.views.decorators.http import require_POST
 from django.views.decorators.csrf import csrf_exempt
 from .forms import UploadForm, ObjectRemovalForm
 from .models import Asset, Version, GeneratorJob
+from django.contrib.auth.decorators import user_passes_test
 
 from PIL import Image, ImageEnhance
 
@@ -426,3 +427,68 @@ def regenerate_preview(request, asset_id):
             return JsonResponse({'status': 'ok', 'url': request.build_absolute_uri(asset.preview_image.url)})
         except Exception as e:
             return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+
+@user_passes_test(lambda u: u.is_staff)
+def batch_regenerate_page(request):
+    """Admin page to select generated assets and enqueue preview generation."""
+    assets = Asset.objects.filter(image__startswith='generated/').order_by('-created_at')[:200]
+    return render(request, 'editor/admin_batch_regen.html', {'assets': assets})
+
+
+@user_passes_test(lambda u: u.is_staff)
+@require_POST
+def batch_enqueue_previews(request):
+    """Enqueue preview generation tasks for selected assets.
+
+    Expects form-encoded 'asset_ids' values (can be multiple). Returns JSON list of {asset_id, preview_url, enqueued}.
+    """
+    ids = request.POST.getlist('asset_ids')
+    if not ids:
+        return JsonResponse({'status': 'error', 'message': 'no asset_ids provided'}, status=400)
+
+    results = []
+    for aid in ids:
+        try:
+            a = Asset.objects.get(pk=int(aid))
+        except Exception:
+            results.append({'asset_id': aid, 'error': 'not found'})
+            continue
+
+        img_path = None
+        try:
+            img_path = a.image.path
+        except Exception:
+            pass
+
+        preview_name = os.path.splitext(os.path.basename(img_path or a.image.name))[0] + '.jpg'
+        preview_rel = f'previews/{preview_name}'
+        preview_url = request.build_absolute_uri(settings.MEDIA_URL + preview_rel)
+
+        try:
+            from .tasks import hf_generate_preview_task
+            hf_generate_preview_task.delay(a.id, prompt=a.title or None)
+            results.append({'asset_id': a.id, 'preview_url': preview_url, 'enqueued': True})
+        except Exception:
+            # fallback: generate locally synchronously
+            try:
+                from PIL import Image, ImageDraw, ImageFont
+                with Image.new('RGB', (512, 512), color=(24, 24, 24)) as base:
+                    draw = ImageDraw.Draw(base)
+                    try:
+                        font = ImageFont.load_default()
+                    except Exception:
+                        font = None
+                    text = a.title or os.path.splitext(os.path.basename(a.image.name))[0]
+                    draw.text((10, 10), text, fill=(230, 230, 230), font=font)
+                    previews_dir = os.path.join(settings.MEDIA_ROOT, 'previews')
+                    os.makedirs(previews_dir, exist_ok=True)
+                    preview_path = os.path.join(previews_dir, preview_name)
+                    base.save(preview_path, format='JPEG', quality=90)
+                a.preview_image.name = preview_rel
+                a.save()
+                results.append({'asset_id': a.id, 'preview_url': preview_url, 'enqueued': False})
+            except Exception as e:
+                results.append({'asset_id': a.id, 'error': str(e)})
+
+    return JsonResponse({'status': 'ok', 'results': results})
