@@ -1,42 +1,45 @@
 import os
-import uuid
 import json
-from django.shortcuts import render, redirect, get_object_or_404
-from django.conf import settings
-from django.http import JsonResponse, HttpResponseBadRequest
-from django.views.decorators.http import require_POST
-from django.views.decorators.csrf import csrf_exempt
-from .forms import UploadForm, ObjectRemovalForm
-from .models import Asset, Version, GeneratorJob
-from django.contrib.auth.decorators import user_passes_test
+import os
+import uuid
 
 from PIL import Image, ImageEnhance
+from django.conf import settings
+from django.contrib.auth.decorators import user_passes_test
+from django.http import HttpResponseBadRequest, JsonResponse
+from django.shortcuts import get_object_or_404, redirect, render
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
+from django.views.decorators.http import require_POST
+from django.views.generic import TemplateView
+
+from .forms import ObjectRemovalForm, UploadForm
+from .models import Asset, GeneratorJob, Version
 
 
-def home(request):
-    # gather recent assets
-    all_assets = list(Asset.objects.order_by('-created_at'))
-    assets = all_assets[:24]
+@method_decorator(cache_page(getattr(settings, 'HOME_CACHE_SECONDS', 300)), name='dispatch')
+class HomeView(TemplateView):
+    """Homepage dashboard showing recent assets with lightweight caching."""
 
-    # derive simple categories from tags found on assets (first N unique)
-    tags = []
-    for a in all_assets:
-        try:
-            for t in (a.tags or []):
-                if t and t not in tags:
-                    tags.append(t)
-        except Exception:
-            continue
-    categories = [{'name': t} for t in tags[:8]]
+    template_name = 'editor/home.html'
 
-    # featured assets: simple heuristic, pick assets that have tag 'featured'
-    featured_assets = [a for a in all_assets if 'featured' in (a.tags or [])][:6]
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        asset_queryset = (
+            Asset.objects.order_by('-created_at')
+            .prefetch_related('generator_jobs')
+        )
+        all_assets = list(asset_queryset[:100])  # limit to keep cache footprint small
+        context['assets'] = all_assets[:24]
 
-    return render(request, 'editor/home.html', {
-        'assets': assets,
-        'categories': categories,
-        'featured_assets': featured_assets,
-    })
+        tags = []
+        for asset in all_assets:
+            for tag in asset.tags or []:
+                if tag and tag not in tags:
+                    tags.append(tag)
+        context['categories'] = [{'name': tag} for tag in tags[:8]]
+        context['featured_assets'] = [a for a in all_assets if 'featured' in (a.tags or [])][:6]
+        return context
 
 
 def upload_and_edit(request):
@@ -249,10 +252,19 @@ def object_removal(request):
     return render(request, 'editor/object_removal.html', {'form': form})
 
 
-def generator_page(request):
-    """Show generator UI and recent generated assets."""
-    recent = Asset.objects.filter(title__startswith='Gen:').order_by('-created_at')[:24]
-    return render(request, 'editor/generator.html', {'recent': recent})
+class GeneratorDashboardView(TemplateView):
+    """Render the generator interface and list recent generated assets."""
+
+    template_name = 'editor/generator.html'
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['recent'] = (
+            Asset.objects.filter(title__startswith='Gen:')
+            .only('id', 'title', 'image', 'preview_image', 'created_at')
+            .order_by('-created_at')[:24]
+        )
+        return context
 
 
 @require_POST
@@ -340,13 +352,15 @@ def create_generator_job(request):
 
 def generator_status(request, job_id):
     """Return JSON status for a generator job: completed flag and result URLs."""
-    job = get_object_or_404(GeneratorJob, pk=job_id)
+    job = get_object_or_404(GeneratorJob.objects.prefetch_related('result_assets'), pk=job_id)
     completed = bool(job.completed)
-    assets = job.result_assets.all()
+    assets = job.result_assets.all().only('id', 'image', 'processed_image', 'preview_image')
     results = []
     for a in assets:
         url = None
-        if a.processed_image:
+        if a.preview_image:
+            url = a.preview_image.url
+        elif a.processed_image:
             url = a.processed_image.url
         elif a.image:
             url = a.image.url
